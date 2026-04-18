@@ -12,4 +12,6 @@ urlpatterns = [
     path('settings/users/', views.list_users, name='list-users'),
     path('settings/users/<str:user_id>/deactivate/', views.deactivate_user, name='deactivate-user'),
     path('settings/school-profile/', views.school_profile, name='school-profile'),
+    path('create-user/', views.create_user_view, name='create-user'),
+    path('register/', views.register_view, name='register'),
 ]

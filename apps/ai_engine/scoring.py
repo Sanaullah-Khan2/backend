@@ -106,82 +106,45 @@ def build_training_data():
 def score_all_students():
     """
     Run the AI scoring engine across all active students.
-    Uses ensemble of Random Forest + Logistic Regression.
+    Uses the trained Random Forest model via risk_engine.
     Returns list of created RiskScore objects.
     """
+    from apps.ai_engine.risk_engine import calculate_risk_score
+    
     students = Student.objects.filter(is_active=True)
     
     if students.count() == 0:
         return []
     
-    # Build training data
-    X_train, y_train = build_training_data()
-    
-    # Need at least 2 samples with both classes to train
-    if len(X_train) < 2 or len(set(y_train)) < 2:
-        # Fallback: use heuristic scoring only
-        results = []
-        for student in students:
-            features = compute_features(student)
-            
-            # Simple heuristic score
-            risk_prob = 0
-            if features['attendance_pct'] < 75:
-                risk_prob += 40
-            if features['grade_avg'] < 50:
-                risk_prob += 35
-            if features['assignments_missed'] >= 3:
-                risk_prob += 25
-            
-            risk_prob = min(risk_prob, 100)
-            risk_level = classify_risk(risk_prob)
-            top_factors = get_top_factors(features)
-            
-            risk_score = RiskScore.objects.create(
-                student=student,
-                score=risk_prob,
-                risk_level=risk_level,
-                attendance_pct=features['attendance_pct'],
-                grade_avg=features['grade_avg'],
-                assignments_missed=features['assignments_missed'],
-                top_factors=top_factors
-            )
-            results.append(risk_score)
-        return results
-    
-    # Train models
-    rf = RandomForestClassifier(n_estimators=50, random_state=42, max_depth=3)
-    lr = LogisticRegression(random_state=42, max_iter=200)
-    
-    rf.fit(X_train, y_train)
-    lr.fit(X_train, y_train)
-    
-    # Score each student
     results = []
     for student in students:
         features = compute_features(student)
-        feature_vector = np.array([[
-            features['attendance_pct'],
-            features['grade_avg'],
-            features['assignments_missed']
-        ]])
         
-        # Ensemble: average probability from both models
-        rf_prob = rf.predict_proba(feature_vector)[0][1] * 100
-        lr_prob = lr.predict_proba(feature_vector)[0][1] * 100
-        risk_prob = round((rf_prob + lr_prob) / 2, 1)
+        # Map our 3 basic features to the 5 features required by the enhanced ML model
+        # Defaulting grade_trend, fee_default, and behavior_count
+        attendance_pct = features['attendance_pct']
+        grade_avg = features['grade_avg']
+        grade_trend = 0  # Default to 0 for MVP
+        fee_default = 0  # Default to 0 for MVP
+        behavior_count = features['assignments_missed']  # Using missed assignments as behavioral proxy
         
-        risk_level = classify_risk(risk_prob)
-        top_factors = get_top_factors(features)
+        # Call the standalone AI model engine
+        score, level, reason = calculate_risk_score(
+            attendance_pct=attendance_pct,
+            grade_avg=grade_avg,
+            grade_trend=grade_trend,
+            fee_default=fee_default,
+            behavior_count=behavior_count
+        )
         
         risk_score = RiskScore.objects.create(
             student=student,
-            score=risk_prob,
-            risk_level=risk_level,
-            attendance_pct=features['attendance_pct'],
-            grade_avg=features['grade_avg'],
+            score=score,
+            risk_level=level.lower(),
+            attendance_pct=attendance_pct,
+            grade_avg=grade_avg,
             assignments_missed=features['assignments_missed'],
-            top_factors=top_factors
+            top_factors=[reason]  # The ML model returns a single descriptive string
         )
         results.append(risk_score)
     
