@@ -3,6 +3,7 @@ from .models import Faculty
 from django.contrib.auth import get_user_model
 import random
 import string
+import hashlib
 
 User = get_user_model()
 
@@ -15,6 +16,16 @@ class FacultySerializer(serializers.ModelSerializer):
         fields = ('_id', 'employee_id', 'full_name', 'subject_specialization', 'contact_number', 'classes_assigned', 'joined_date', 'is_active', 'email', 'role')
         read_only_fields = ('_id', 'employee_id', 'joined_date')
 
+    def validate_email(self, value):
+        email = value.lower().strip()
+        from eduaims.supabase_client import supabase
+        res = supabase.table('users').select('id').eq('email', email).execute()
+        if res.data:
+            raise serializers.ValidationError("A user with this email already exists.")
+        if User.objects.filter(email=email).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return email
+
     def create(self, validated_data):
         email = validated_data.pop('email')
         role = validated_data.pop('role')
@@ -22,7 +33,7 @@ class FacultySerializer(serializers.ModelSerializer):
         # Generate random password
         password = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
         
-        # Create User
+        # Create User in Django DB
         user = User.objects.create_user(
             email=email,
             password=password,
@@ -30,6 +41,19 @@ class FacultySerializer(serializers.ModelSerializer):
             role=role,
             is_staff=(role in ['admin', 'teacher'])
         )
+        
+        # Create User in Supabase
+        salt = 'eduaims_fixed_salt_2024'
+        password_hash = hashlib.sha256((salt + password).encode()).hexdigest()
+        
+        from eduaims.supabase_client import supabase
+        supabase.table('users').insert({
+            'email': email,
+            'password_hash': password_hash,
+            'role': role,
+            'name': validated_data.get('full_name'),
+            'is_active': True,
+        }).execute()
         
         # In a real system, we'd send an email here using Django's send_mail
         print(f"--- MOCK EMAIL SENDER ---")
@@ -44,5 +68,7 @@ class FacultySerializer(serializers.ModelSerializer):
         # Update user linked_id back-reference to Faculty profile
         user.linked_id = faculty._id
         user.save()
+        
+        supabase.table('users').update({'linked_id': str(faculty._id)}).eq('email', email).execute()
         
         return faculty

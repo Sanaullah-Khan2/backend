@@ -1,6 +1,6 @@
 """
 EduAIMS AI Risk Scoring Engine
-Uses Random Forest + Logistic Regression ensemble to predict at-risk students.
+Uses XGBoost ensemble to predict at-risk students.
 Features: attendance %, grade average, assignments missed.
 """
 
@@ -16,30 +16,30 @@ from apps.grades.models import Grade
 from apps.ai_engine.models import RiskScore
 
 
-def compute_features(student):
-    """Extract feature vector for a single student."""
+def compute_features(student_id):
+    """Extract feature vector for a single student from Supabase."""
     # 1. Attendance percentage (last 30 days)
-    thirty_days_ago = date.today() - timedelta(days=30)
-    attendance_qs = AttendanceRecord.objects.filter(
-        student=student,
-        date__gte=thirty_days_ago
-    )
-    total_att = attendance_qs.count()
-    present_att = attendance_qs.filter(status='present').count()
-    late_att = attendance_qs.filter(status='late').count()
+    thirty_days_ago = (date.today() - timedelta(days=30)).isoformat()
+    
+    from eduaims.supabase_client import supabase
+    
+    attendance_res = supabase.table('attendance').select('status').eq('student_id', student_id).gte('date', thirty_days_ago).execute()
+    att_data = attendance_res.data or []
+    total_att = len(att_data)
+    present_att = sum(1 for a in att_data if a.get('status') == 'present')
+    late_att = sum(1 for a in att_data if a.get('status') == 'late')
+    absent_count = sum(1 for a in att_data if a.get('status') == 'absent')
+    
     attendance_pct = ((present_att + late_att * 0.5) / total_att * 100) if total_att > 0 else 100.0
     
     # 2. Grade average (all terms)
-    grade_agg = Grade.objects.filter(student=student).aggregate(
-        avg_score=Avg('score'),
-        avg_total=Avg('total_score')
-    )
-    avg_score = grade_agg['avg_score'] or 0
-    avg_total = grade_agg['avg_total'] or 100
-    grade_avg = (float(avg_score) / float(avg_total) * 100) if avg_total > 0 else 50.0
+    grade_res = supabase.table('grades').select('score, total_score').eq('student_id', student_id).execute()
+    grade_data = grade_res.data or []
     
-    # 3. Absent days count (proxy for assignments missed)
-    absent_count = attendance_qs.filter(status='absent').count()
+    total_score_sum = sum(g.get('score', 0) or 0 for g in grade_data)
+    total_max_sum = sum(g.get('total_score', 100) or 100 for g in grade_data)
+    
+    grade_avg = (float(total_score_sum) / float(total_max_sum) * 100) if total_max_sum > 0 else 50.0
     
     return {
         'attendance_pct': round(attendance_pct, 2),
@@ -106,19 +106,23 @@ def build_training_data():
 def score_all_students():
     """
     Run the AI scoring engine across all active students.
-    Uses the trained Random Forest model via risk_engine.
+    Uses the trained XGBoost model via risk_engine.
     Returns list of created RiskScore objects.
     """
     from apps.ai_engine.risk_engine import calculate_risk_score
+    from eduaims.supabase_client import supabase
     
-    students = Student.objects.filter(is_active=True)
+    # Fetch students from Supabase
+    students_res = supabase.table('students').select('*').eq('is_active', True).execute()
+    students = students_res.data or []
     
-    if students.count() == 0:
+    if not students:
         return []
     
     results = []
     for student in students:
-        features = compute_features(student)
+        student_id = student['id']
+        features = compute_features(student_id)
         
         # Map our 3 basic features to the 5 features required by the enhanced ML model
         # Defaulting grade_trend, fee_default, and behavior_count
@@ -137,15 +141,22 @@ def score_all_students():
             behavior_count=behavior_count
         )
         
-        risk_score = RiskScore.objects.create(
-            student=student,
-            score=score,
-            risk_level=level.lower(),
-            attendance_pct=attendance_pct,
-            grade_avg=grade_avg,
-            assignments_missed=features['assignments_missed'],
-            top_factors=[reason]  # The ML model returns a single descriptive string
-        )
-        results.append(risk_score)
+        # Write to Supabase risk_scores table
+        risk_data = {
+            'student_id': student_id,
+            'score': score,
+            'risk_level': level.lower(),
+            'attendance_pct': attendance_pct,
+            'grade_avg': grade_avg,
+            'assignments_missed': features['assignments_missed'],
+            'top_factors': [reason]
+        }
+        
+        # We can update if exists, or insert new. Let's try upsert or delete then insert.
+        # But supabase doesn't have a direct upsert without a unique constraint easily known here.
+        # We will insert new records.
+        res = supabase.table('risk_scores').insert(risk_data).execute()
+        if res.data:
+            results.append(res.data[0])
     
     return results

@@ -19,8 +19,13 @@ def generate_tokens_for_user(user_dict):
     refresh = RefreshToken.for_user(django_user)
     refresh['email'] = user_dict['email']
     refresh['role'] = user_dict['role']
+    
+    access = refresh.access_token
+    access['email'] = user_dict['email']
+    access['role'] = user_dict['role']
+    
     return {
-        'access': str(refresh.access_token),
+        'access': str(access),
         'refresh': str(refresh)
     }
 
@@ -44,8 +49,18 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         if user['password_hash'] != expected:
             return Response({'error': 'Invalid email or password.'}, status=401)
 
-        if user['role'] == 'admin' and user['email'] != 'sanaullahkkhan2004@gmail.com':
-            return Response({'error': 'Unauthorized. Admin access denied.'}, status=403)
+        # Check if user is active
+        if not user.get('is_active', True):
+            return Response({
+                'error': 'pending_approval', 
+                'message': 'Your account is pending admin approval'
+            }, status=403)
+
+        # If it's an admin login, we verify role from DB
+        if user['role'] == 'admin':
+            if not user.get('is_active', True):
+                return Response({'error': 'Access denied'}, status=403)
+        # Note: We allow non-admins to login here since they need tokens for other portals
 
         tokens = generate_tokens_for_user(user)
         return Response({
@@ -109,9 +124,70 @@ def school_profile(request):
 
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated])
+def create_admin_view(request):
+    user = request.user
+    
+    # We must check if the requesting user is an admin by querying their role from DB or JWT
+    # SimpleJWT token payload doesn't map to request.user.role directly if not customized properly
+    # Let's verify from Supabase to be completely safe
+    sb = get_sb()
+    req_user_res = sb.table('users').select('role, id').eq('email', user.email).execute()
+    if not req_user_res.data or req_user_res.data[0]['role'] != 'admin':
+        return Response({"error": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
+    
+    requesting_admin_id = req_user_res.data[0]['id']
+    
+    data = request.data
+    email = data.get('email', '').strip().lower()
+    password = data.get('password', '')
+    name = data.get('name', '')
+
+    if not email or not password or not name:
+        return Response({"error": "Name, email, and password are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Check if email exists
+    existing = sb.table('users').select('id').eq('email', email).execute()
+    if existing.data:
+        return Response({"error": "This email is already registered"}, status=status.HTTP_409_CONFLICT)
+
+    import hashlib
+    import datetime
+    salt = 'eduaims_fixed_salt_2024'
+    password_hash = hashlib.sha256((salt + password).encode()).hexdigest()
+
+    try:
+        # Insert new admin
+        new_admin = {
+            'email': email,
+            'password_hash': password_hash,
+            'role': 'admin',
+            'name': name,
+            'is_active': True
+        }
+        res = sb.table('users').insert(new_admin).execute()
+        
+        if res.data:
+            new_id = res.data[0]['id']
+            # Log to audit_log
+            audit_entry = {
+                'action': 'admin_created',
+                'user_id': requesting_admin_id,
+                'details': f'Created new admin: {email}'
+            }
+            sb.table('audit_log').insert(audit_entry).execute()
+            
+            return Response({"success": True, "message": f"Admin account created for {email}"})
+        else:
+            return Response({"error": "Failed to create admin"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
 def create_user_view(request):
     user = request.user
-    if user.role != 'admin':
+    if getattr(user, 'role', '') != 'admin':
         return Response({"error": "Admin access required"}, status=status.HTTP_403_FORBIDDEN)
     
     data = request.data

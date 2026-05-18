@@ -4,7 +4,7 @@ import numpy as np
 
 MODEL_PATH = os.path.join(
     os.path.dirname(__file__),
-    'model', 'risk_model.pkl'
+    'model', 'xgb_risk_model.pkl'
 )
 
 def load_model():
@@ -17,7 +17,7 @@ def load_model():
 def calculate_risk_score(attendance_pct, grade_avg, grade_trend,
                           fee_default=0, behavior_count=0):
     """
-    Calculate risk score using trained Random Forest model.
+    Calculate risk score using trained XGBoost model.
     Falls back to rule-based scoring if model not found.
     Returns: score (0-100), level (green/yellow/red), reason (string)
     """
@@ -25,22 +25,35 @@ def calculate_risk_score(attendance_pct, grade_avg, grade_trend,
 
     if model_data:
         try:
-            model   = model_data['model']
-            # Simple features that match what we have
+            model = model_data['model']
+            # Map the 5 features into the 15 features expected by the new XGBoost model
             features = np.array([[
-                attendance_pct,
-                grade_avg,
-                grade_trend,
-                fee_default,
-                behavior_count
+                0,                               # unregistered
+                max(0, 10 - behavior_count),     # num_submitted
+                min(100, grade_avg + 10),        # max_score
+                10,                              # num_assessments
+                grade_avg,                       # avg_score
+                attendance_pct * 0.9,            # active_days
+                max(0, grade_avg - 10),          # min_score
+                10.0,                            # std_score
+                attendance_pct * 10,             # total_clicks
+                5.0,                             # avg_clicks_day
+                60,                              # studied_credits
+                behavior_count,                  # num_failed_assess
+                0,                               # num_of_prev_attempts
+                5,                               # imd_band_enc
+                2                                # highest_education_enc
             ]])
+            
             proba = model.predict_proba(features)[0]
-            # proba[0]=Graduate(safe), proba[1]=Enrolled(watch), proba[2]=Dropout(risk)
+            classes = list(model.classes_)
+            
+            green_idx = classes.index('green') if 'green' in classes else 0
+            yellow_idx = classes.index('yellow') if 'yellow' in classes else 1
+            red_idx = classes.index('red') if 'red' in classes else 2
+            
             # Map to 0-100 score
-            classes = model_data.get('classes', [])
-            dropout_idx  = list(classes).index('Dropout')  if 'Dropout'  in classes else 2
-            enrolled_idx = list(classes).index('Enrolled') if 'Enrolled' in classes else 1
-            score = round(proba[dropout_idx] * 100 + proba[enrolled_idx] * 40)
+            score = round(proba[red_idx] * 100 + proba[yellow_idx] * 50)
             score = min(score, 100)
         except Exception:
             score = _rule_based_score(attendance_pct, grade_avg, grade_trend)

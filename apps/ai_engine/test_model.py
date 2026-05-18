@@ -4,27 +4,22 @@ import numpy as np
 
 MODEL_PATH = os.path.join(
     os.path.dirname(__file__),
-    'model', 'risk_model.pkl'
+    'model', 'xgb_risk_model.pkl'
 )
 
 def load_model():
     with open(MODEL_PATH, 'rb') as f:
         return pickle.load(f)
 
+import sys
+import os
+sys.path.append(os.path.dirname(__file__))
+from risk_engine import calculate_risk_score
+
 def test_single_student(name, attendance_pct, grade_avg, grade_trend, fee_default=0, behavior_count=0):
-    model_data = load_model()
-    model      = model_data['model']
-    classes    = model_data['classes']
-
-    features = np.array([[attendance_pct, grade_avg, grade_trend, fee_default, behavior_count]])
-
-    proba = model.predict_proba(features)[0]
-
-    dropout_idx  = list(classes).index('Dropout')  if 'Dropout'  in classes else 2
-    enrolled_idx = list(classes).index('Enrolled') if 'Enrolled' in classes else 1
-
-    score = round(proba[dropout_idx] * 100 + proba[enrolled_idx] * 40)
-    score = min(score, 100)
+    score, level_raw, reason = calculate_risk_score(
+        attendance_pct, grade_avg, grade_trend, fee_default, behavior_count
+    )
 
     if score >= 70:
         level = 'RED   (At Risk)'
@@ -32,17 +27,6 @@ def test_single_student(name, attendance_pct, grade_avg, grade_trend, fee_defaul
         level = 'YELLOW (Watch)'
     else:
         level = 'GREEN  (Safe)'
-
-    if attendance_pct < 75 and grade_avg < 50:
-        reason = f'Low attendance ({attendance_pct:.0f}%) and low grades ({grade_avg:.0f}%)'
-    elif attendance_pct < 75:
-        reason = f'Low attendance ({attendance_pct:.0f}%)'
-    elif grade_avg < 50:
-        reason = f'Low grade average ({grade_avg:.0f}%)'
-    elif grade_trend < -15:
-        reason = f'Grade dropped {abs(grade_trend):.0f}% from last month'
-    else:
-        reason = 'Student performing well'
 
     print(f"Student : {name}")
     print(f"Score   : {score}/100")
