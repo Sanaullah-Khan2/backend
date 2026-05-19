@@ -25,5 +25,4 @@ share/python-wheels/
 MANIFEST
 
 # VS Code
-.vscode/
-*.zip  
+.vscode/  
