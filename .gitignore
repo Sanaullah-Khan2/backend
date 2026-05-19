@@ -26,3 +26,4 @@ MANIFEST
 
 # VS Code
 .vscode/
+*.zip  
