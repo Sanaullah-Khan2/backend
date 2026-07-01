@@ -165,3 +165,312 @@ SIMPLE_JWT = {
 
 # Custom User Model
 AUTH_USER_MODEL = 'auth_app.CustomUser'
+
+# ----------------------------------------------------------------------
+# OFFLINE FALLBACK MOCK FOR SUPABASE
+# ----------------------------------------------------------------------
+import supabase
+import httpx
+import json
+import sqlite3
+import uuid
+
+_original_create_client = supabase.create_client
+
+class SQLiteResponse:
+    def __init__(self, data):
+        self.data = data
+        self.count = len(data) if isinstance(data, list) else (1 if data else 0)
+
+class OfflineFallbackSupabaseClient:
+    def __init__(self, real_client):
+        self.real_client = real_client
+
+    def table(self, table_name):
+        real_builder = self.real_client.table(table_name) if self.real_client else None
+        return OfflineFallbackRequestBuilder(real_builder, table_name)
+
+class OfflineFallbackRequestBuilder:
+    def __init__(self, real_builder, table_name):
+        self.real_builder = real_builder
+        self.table_name = table_name
+        self.select_cols = '*'
+        self.filters = []
+        self.orders = []
+        self.limit_val = None
+        self.is_single = False
+        self.insert_data = None
+        self.update_data = None
+        self.delete_op = False
+
+    def select(self, cols='*', *args, **kwargs):
+        self.select_cols = cols
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.select(cols, *args, **kwargs)
+            except: pass
+        return self
+
+    def eq(self, col, val):
+        self.filters.append((col, '=', val))
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.eq(col, val)
+            except: pass
+        return self
+
+    def neq(self, col, val):
+        self.filters.append((col, '!=', val))
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.neq(col, val)
+            except: pass
+        return self
+
+    def gt(self, col, val):
+        self.filters.append((col, '>', val))
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.gt(col, val)
+            except: pass
+        return self
+
+    def gte(self, col, val):
+        self.filters.append((col, '>=', val))
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.gte(col, val)
+            except: pass
+        return self
+
+    def lt(self, col, val):
+        self.filters.append((col, '<', val))
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.lt(col, val)
+            except: pass
+        return self
+
+    def lte(self, col, val):
+        self.filters.append((col, '<=', val))
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.lte(col, val)
+            except: pass
+        return self
+
+    def in_(self, col, val):
+        self.filters.append((col, 'IN', val))
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.in_(col, val)
+            except: pass
+        return self
+
+    def order(self, col, desc=False):
+        self.orders.append((col, 'DESC' if desc else 'ASC'))
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.order(col, desc=desc)
+            except: pass
+        return self
+
+    def limit(self, val):
+        self.limit_val = val
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.limit(val)
+            except: pass
+        return self
+
+    def single(self):
+        self.is_single = True
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.single()
+            except: pass
+        return self
+
+    def insert(self, data):
+        self.insert_data = data
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.insert(data)
+            except: pass
+        return self
+
+    def update(self, data):
+        self.update_data = data
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.update(data)
+            except: pass
+        return self
+
+    def delete(self):
+        self.delete_op = True
+        if self.real_builder:
+            try: self.real_builder = self.real_builder.delete()
+            except: pass
+        return self
+
+    def execute(self):
+        if self.real_builder:
+            try:
+                return self.real_builder.execute()
+            except Exception as e:
+                # Catch getaddrinfo and ConnectErrors / HTTP errors
+                print(f"[Supabase Connect Error] {type(e).__name__}: {e}. Falling back to SQLite.")
+                return self.execute_sqlite()
+        else:
+            return self.execute_sqlite()
+
+    def execute_sqlite(self):
+        db_path = str(BASE_DIR / 'db.sqlite3')
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        params = []
+
+        if self.insert_data:
+            if isinstance(self.insert_data, list):
+                rows = self.insert_data
+            else:
+                rows = [self.insert_data]
+
+            inserted_rows = []
+            for row in rows:
+                cols = list(row.keys())
+                vals = list(row.values())
+                
+                if 'id' not in row:
+                    cols.append('id')
+                    vals.append(str(uuid.uuid4()))
+
+                for i in range(len(vals)):
+                    if isinstance(vals[i], (dict, list)):
+                        vals[i] = json.dumps(vals[i])
+
+                placeholders = ", ".join(["?"] * len(cols))
+                stmt = f"INSERT OR REPLACE INTO {self.table_name} ({', '.join(cols)}) VALUES ({placeholders})"
+                cur.execute(stmt, vals)
+                
+                inserted_row = {}
+                for k, v in zip(cols, vals):
+                    inserted_row[k] = v
+                inserted_rows.append(inserted_row)
+            
+            conn.commit()
+            conn.close()
+            return SQLiteResponse(inserted_rows)
+
+        elif self.update_data:
+            set_parts = []
+            vals = []
+            for k, v in self.update_data.items():
+                set_parts.append(f"{k} = ?")
+                if isinstance(v, (dict, list)):
+                    v = json.dumps(v)
+                vals.append(v)
+            
+            where_sql, where_params = self._build_where()
+            stmt = f"UPDATE {self.table_name} SET {', '.join(set_parts)}"
+            if where_sql:
+                stmt += f" WHERE {where_sql}"
+                vals.extend(where_params)
+            
+            cur.execute(stmt, vals)
+            conn.commit()
+            conn.close()
+            return SQLiteResponse([self.update_data])
+
+        elif self.delete_op:
+            where_sql, where_params = self._build_where()
+            stmt = f"DELETE FROM {self.table_name}"
+            if where_sql:
+                stmt += f" WHERE {where_sql}"
+                params.extend(where_params)
+            
+            cur.execute(stmt, params)
+            conn.commit()
+            conn.close()
+            return SQLiteResponse([])
+
+        else:
+            select_stmt = "*"
+            if isinstance(self.select_cols, str):
+                select_stmt = self.select_cols
+            elif isinstance(self.select_cols, list):
+                select_stmt = ", ".join(self.select_cols)
+
+            has_student_join = False
+            if isinstance(select_stmt, str) and 'student:students' in select_stmt:
+                has_student_join = True
+                parts = [p.strip() for p in select_stmt.split(',') if 'student:students' not in p]
+                select_stmt = ", ".join(parts) if parts else "*"
+
+            stmt = f"SELECT {select_stmt} FROM {self.table_name}"
+            where_sql, where_params = self._build_where()
+            if where_sql:
+                stmt += f" WHERE {where_sql}"
+                params.extend(where_params)
+            
+            if self.orders:
+                order_parts = [f"{col} {direction}" for col, direction in self.orders]
+                stmt += f" ORDER BY {', '.join(order_parts)}"
+            
+            if self.limit_val:
+                stmt += f" LIMIT {self.limit_val}"
+
+            cur.execute(stmt, params)
+            rows = cur.fetchall()
+
+            data = []
+            for r in rows:
+                d = dict(r)
+                for k in d:
+                    if isinstance(d[k], str) and (d[k].startswith('{') or d[k].startswith('[')):
+                        try: d[k] = json.loads(d[k])
+                        except: pass
+
+                if has_student_join:
+                    student_id = d.get('student_id')
+                    student_data = {}
+                    if student_id:
+                        try:
+                            cur2 = conn.cursor()
+                            cur2.execute("SELECT * FROM students WHERE id = ?", [student_id])
+                            st_row = cur2.fetchone()
+                            if st_row:
+                                student_data = dict(st_row)
+                                for k in student_data:
+                                    if isinstance(student_data[k], str) and (student_data[k].startswith('{') or student_data[k].startswith('[')):
+                                        try: student_data[k] = json.loads(student_data[k])
+                                        except: pass
+                        except Exception as join_err:
+                            print("SQLite fallback join error:", join_err)
+                    d['student'] = student_data
+
+                data.append(d)
+
+            conn.close()
+
+            if self.is_single:
+                return SQLiteResponse(data[0] if data else None)
+            
+            return SQLiteResponse(data)
+
+    def _build_where(self):
+        if not self.filters:
+            return "", []
+        
+        parts = []
+        params = []
+        for col, op, val in self.filters:
+            if op == 'IN':
+                placeholders = ", ".join(["?"] * len(val))
+                parts.append(f"{col} IN ({placeholders})")
+                params.extend(val)
+            else:
+                parts.append(f"{col} {op} ?")
+                params.append(val)
+        
+        return " AND ".join(parts), params
+
+def create_client_fallback(url, key):
+    try:
+        real_client = _original_create_client(url, key)
+    except:
+        real_client = None
+    return OfflineFallbackSupabaseClient(real_client)
+
+supabase.create_client = create_client_fallback
+

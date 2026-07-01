@@ -16,8 +16,30 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from django.http import JsonResponse
+from apps.reports import views as reports_views
+
+
+def api_root(request):
+    """Root endpoint — confirms the EduAIMS API is running."""
+    return JsonResponse({
+        "status": "ok",
+        "message": "EduAIMS API is running.",
+        "version": "1.0.0",
+        "docs": "Use /api/ prefixed endpoints to interact with the system.",
+        "portals": {
+            "admin":   "/api/admin/",
+            "auth":    "/api/auth/",
+            "students":"/api/students/",
+            "faculty": "/api/faculty/",
+            "grades":  "/api/grades/",
+            "ai":      "/api/ai/",
+        }
+    })
+
 
 urlpatterns = [
+    path('', api_root, name='api_root'),
     path('admin/', admin.site.urls),
     path('api/auth/', include('apps.auth_app.urls')),
     path('api/students/', include('apps.students.urls')),
@@ -31,4 +53,8 @@ urlpatterns = [
     path('api/audit/', include('apps.audit.urls')),
     path('api/notifications/', include('apps.notifications.urls')),
     path('api/assignments/', include('apps.assignments.urls')),
+    path('api/admin/dashboard-stats/', reports_views.admin_dashboard_stats, name='admin_dashboard_stats'),
+    path('api/admin/highlights/', reports_views.admin_highlights, name='admin_highlights'),
+    path('api/announcements/', reports_views.announcements_list, name='announcements_list'),
 ]
+

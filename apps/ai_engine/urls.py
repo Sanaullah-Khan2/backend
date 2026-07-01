@@ -7,4 +7,5 @@ urlpatterns = [
     path('recalculate/',              views.recalculate_all,       name='recalculate'),
     path('interventions/',            views.list_interventions,    name='list-interventions'),
     path('interventions/create/',     views.create_intervention,   name='create-intervention'),
+    path('predict-manual/',           views.predict_manual,        name='predict-manual'),
 ]

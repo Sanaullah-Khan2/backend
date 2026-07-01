@@ -8,6 +8,57 @@ from apps.students.models import Student
 class GradeViewSet(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
+    def create(self, request):
+        """Handle POST /api/grades/ from the teacher grades page.
+        Accepts: { grades: [{ student_id, subject, exam_type, marks, total_marks, month, class_name }] }
+        """
+        from eduaims.supabase_client import supabase
+
+        grades_list = request.data.get('grades', [])
+        if not grades_list:
+            return Response({"error": "grades array is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        recorded_by = str(request.user.id) if hasattr(request.user, 'id') else None
+        created = []
+
+        for g in grades_list:
+            student_id = g.get('student_id')
+            subject_id = g.get('subject') or g.get('subject_id', '')
+            term = g.get('exam_type') or g.get('term', '')
+            score = g.get('marks', 0)
+            if score == '' or score is None:
+                score = 0
+            total_score = g.get('total_marks', 100)
+
+            try:
+                # Check for existing record
+                existing = supabase.table('grades').select('id') \
+                    .eq('student_id', student_id) \
+                    .eq('subject_id', subject_id) \
+                    .eq('term', term).execute()
+
+                grade_data = {
+                    'student_id': student_id,
+                    'subject_id': subject_id,
+                    'term': term,
+                    'score': float(score),
+                    'total_score': float(total_score),
+                    'recorded_by': recorded_by
+                }
+
+                if existing.data:
+                    res = supabase.table('grades').update(grade_data).eq('id', existing.data[0]['id']).execute()
+                else:
+                    res = supabase.table('grades').insert(grade_data).execute()
+
+                if res.data:
+                    created.append(res.data[0])
+            except Exception as e:
+                print(f"Grade save error for student {student_id}:", e)
+                continue
+
+        return Response({"message": "Grades saved", "count": len(created), "records": created}, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=['post'], url_path='bulk-mark')
     def bulk_mark(self, request):
         from eduaims.supabase_client import supabase

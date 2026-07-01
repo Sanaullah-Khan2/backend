@@ -105,12 +105,35 @@ def send_bulk_alert(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def notification_log(request):
-    """Return a mock log of recent sent notifications."""
-    data = [
-        {"id": 1, "type": "email", "to": "parent1@example.com", "subject": "Risk Alert: Ali Hassan", "sent_at": "2024-03-28 09:15", "status": "delivered"},
-        {"id": 2, "type": "sms",   "to": "+923001234567",        "subject": "Attendance Warning",     "sent_at": "2024-03-27 14:30", "status": "delivered"},
-        {"id": 3, "type": "email", "to": "parent2@example.com", "subject": "Weekly Report Ready",    "sent_at": "2024-03-25 08:00", "status": "delivered"},
-        {"id": 4, "type": "sms",   "to": "+923007654321",        "subject": "Grade Drop Alert",       "sent_at": "2024-03-24 11:45", "status": "failed"},
-        {"id": 5, "type": "email", "to": "parent3@example.com", "subject": "Risk Alert: Bilal Khan", "sent_at": "2024-03-22 10:00", "status": "delivered"},
-    ]
-    return Response({"success": True, "data": data, "count": len(data)})
+    """Return a live log of recent notifications and interventions."""
+    try:
+        from eduaims.supabase_client import supabase
+        data = []
+        
+        # Get interventions
+        int_res = supabase.table('interventions').select('*').order('date', desc=True).limit(10).execute()
+        for i in (int_res.data or []):
+            data.append({
+                "id": f"int_{i['id']}",
+                "type": "email",
+                "to": f"parent of {i.get('student_name', 'Student')}",
+                "subject": f"Intervention: {i.get('action_type', '')}",
+                "sent_at": str(i.get('date', '')),
+                "status": "delivered"
+            })
+            
+        # Get announcements
+        ann_res = supabase.table('announcements').select('*').order('posted_date', desc=True).limit(5).execute()
+        for a in (ann_res.data or []):
+            data.append({
+                "id": f"ann_{a['id']}",
+                "type": "system",
+                "to": "All",
+                "subject": a.get('title', 'Announcement'),
+                "sent_at": str(a.get('posted_date', '')),
+                "status": "delivered"
+            })
+            
+        return Response({"success": True, "data": data, "count": len(data)})
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=500)
